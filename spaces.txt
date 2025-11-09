@@ -1,0 +1,15 @@
+# HF Space Keep-Alive Registry
+# Add your Hugging Face Space URL below (one per line)
+# Format: https://username-spacename.hf.space
+# 
+# Guidelines:
+# - One Space per user (max 2-3 if you have multiple projects)
+# - Valid HF Space URLs only
+# - No commercial spam services
+#
+# Example:
+# https://your-username-your-space.hf.space
+
+# Add your Space URLs below this line:
+https://iamdivyam-llm-app-developer.hf.space/health
+
