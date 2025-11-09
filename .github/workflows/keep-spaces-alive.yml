@@ -1,0 +1,236 @@
+name: Keep HF Spaces Alive
+
+on:
+  # Run once every 24 hours at midnight UTC
+  schedule:
+    - cron: '0 0 * * *'
+  
+  # Trigger when spaces.txt is modified on main branch
+  push:
+    branches:
+      - main
+    paths:
+      - 'spaces.txt'
+  
+  # Manual trigger from Actions tab
+  workflow_dispatch:
+  
+  # Validate URLs on PRs (doesn't ping, just validates)
+  pull_request:
+    paths:
+      - 'spaces.txt'
+
+# Minimal permissions - read only
+permissions:
+  contents: read
+
+jobs:
+  # URL validation job - runs on PRs only
+  validate-urls:
+    name: Validate Space URLs
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      
+      - name: Validate URLs format and security
+        run: |
+          echo "🔍 Validating URLs in spaces.txt..."
+          
+          # Colors for output
+          RED='\033[0;31m'
+          GREEN='\033[0;32m'
+          YELLOW='\033[1;33m'
+          NC='\033[0m' # No Color
+          
+          invalid=0
+          valid=0
+          
+          while IFS= read -r line; do
+            # Skip empty lines and comments
+            [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+            
+            url="$line"
+            
+            # Validation 1: Must be HTTPS
+            if [[ ! "$url" =~ ^https:// ]]; then
+              echo -e "${RED} INVALID: Must use HTTPS${NC}"
+              echo "   URL: $url"
+              invalid=$((invalid + 1))
+              continue
+            fi
+            
+            # Validation 2: Must be huggingface.co domain
+            if [[ ! "$url" =~ ^https://[a-zA-Z0-9-]+\.hf\.space(/.*)?$ ]]; then
+              echo -e "${RED} INVALID: Must be *.hf.space domain${NC}"
+              echo "   URL: $url"
+              echo "   Expected format: https://username-spacename.hf.space"
+              invalid=$((invalid + 1))
+              continue
+            fi
+            
+            # Validation 3: Check for suspicious patterns
+            if [[ "$url" =~ (\.\.|//|localhost|127\.0\.0\.1|\$\{|\`|<|>|\||;|&) ]]; then
+              echo -e "${RED} INVALID: Suspicious characters detected${NC}"
+              echo "   URL: $url"
+              invalid=$((invalid + 1))
+              continue
+            fi
+            
+            # Validation 4: Length check (reasonable URL length)
+            if [ ${#url} -gt 200 ]; then
+              echo -e "${RED} INVALID: URL too long (max 200 chars)${NC}"
+              echo "   URL: $url"
+              invalid=$((invalid + 1))
+              continue
+            fi
+            
+            # If we got here, URL is valid
+            echo -e "${GREEN}✓ Valid:${NC} $url"
+            valid=$((valid + 1))
+            
+          done < spaces.txt
+          
+          echo ""
+          echo "=========================================="
+          echo "Validation Summary:"
+          echo " Valid URLs: $valid"
+          echo " Invalid URLs: $invalid"
+          echo "=========================================="
+          
+          if [ $invalid -gt 0 ]; then
+            echo ""
+            echo -e "${RED}Validation failed. Please fix the invalid URLs.${NC}"
+            exit 1
+          fi
+          
+          echo -e "${GREEN}All URLs are valid! ${NC}"
+
+  # Ping job - runs on schedule, push, and manual trigger
+  ping-spaces:
+    name: Ping HF Spaces
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30  # Prevent hanging workflows
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Display trigger information
+        run: |
+          echo "=========================================="
+          echo " Workflow Trigger Information"
+          echo "=========================================="
+          echo "Event: ${{ github.event_name }}"
+          echo "Repository: ${{ github.repository }}"
+          echo "Branch: ${{ github.ref }}"
+          echo "Triggered at: $(date)"
+          echo ""
+          
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo " Trigger Type: Scheduled daily ping"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            echo " Trigger Type: New space added to spaces.txt"
+            echo "Commit: ${{ github.event.head_commit.message }}"
+            echo "Author: ${{ github.event.head_commit.author.name }}"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "👤 Trigger Type: Manual trigger"
+            echo "Triggered by: ${{ github.actor }}"
+          fi
+          echo "=========================================="
+          echo ""
+      
+      - name: Validate URLs before ping (security check)
+        run: |
+          echo " Running security validation..."
+          
+          while IFS= read -r url; do
+            [[ -z "$url" || "$url" =~ ^[[:space:]]*# ]] && continue
+            
+            # Validate format
+            if [[ ! "$url" =~ ^https://[a-zA-Z0-9-]+\.hf\.space(/.*)?$ ]]; then
+              echo "Security check failed: Invalid URL detected: $url"
+              exit 1
+            fi
+            
+            # Check for suspicious patterns
+            if [[ "$url" =~ (\.\.|localhost|127\.0\.0\.1|\$\{|\`|<|>|\||;|&) ]]; then
+              echo "Security check failed: Suspicious pattern in URL: $url"
+              exit 1
+            fi
+          done < spaces.txt
+          
+          echo "✓ Security validation passed"
+          echo ""
+      
+      - name: Ping all registered spaces
+        run: |
+          echo " Starting to ping HF Spaces at $(date)"
+          echo ""
+          
+          count=0
+          success=0
+          failed=0
+          
+          while IFS= read -r url; do
+            [[ -z "$url" || "$url" =~ ^[[:space:]]*# ]] && continue
+            
+            count=$((count + 1))
+            echo "=========================================="
+            echo "[$count] Pinging: $url"
+            
+            # Use timeout to prevent hanging
+            # -f: fail on HTTP errors
+            # -s: silent mode (no progress bar)
+            # -o /dev/null: discard response body
+            # -w: write out format string
+            # --max-time: maximum time allowed for transfer
+            # --connect-timeout: maximum time for connection
+            # --retry: number of retries
+            # --retry-delay: wait time between retries
+            if timeout 30 curl -f -s -o /dev/null \
+              -w "Status: %{http_code} | Time: %{time_total}s | Size: %{size_download} bytes\n" \
+              --max-time 25 \
+              --connect-timeout 10 \
+              --retry 2 \
+              --retry-delay 2 \
+              "$url"; then
+              echo " Success - Space is alive!"
+              success=$((success + 1))
+            else
+              echo " Failed - Space may be sleeping or temporarily unavailable"
+              failed=$((failed + 1))
+            fi
+            
+            # Rate limiting - respectful delay between requests
+            sleep 3
+            
+          done < spaces.txt
+          
+          echo ""
+          echo "=========================================="
+          echo "           PING SUMMARY REPORT           "
+          echo "=========================================="
+          echo " Total spaces registered: $count"
+          echo " Successful pings: $success"
+          echo " Failed pings: $failed"
+          
+          if [ $count -gt 0 ]; then
+            success_rate=$((success * 100 / count))
+            echo " Success rate: ${success_rate}%"
+          fi
+          
+          echo " Completed at: $(date)"
+          echo "=========================================="
+          
+          # Optional: Exit with error if all pings failed (helps catch issues)
+          if [ $count -gt 0 ] && [ $success -eq 0 ]; then
+            echo ""
+            echo "⚠️  WARNING: All pings failed. Please check the spaces."
+            exit 1
+          fi
